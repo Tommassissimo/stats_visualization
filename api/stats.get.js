@@ -13,6 +13,7 @@ var Microtask = CS.models.microtask;
 var Task      = CS.models.task;
 var OBJECT    = CS.models.object;
 var Platform  = CS.models.platform;
+var Performer = CS.models.user
 
 // Generate custom error `GetAnswersError` that inherits
 // from `APIError`
@@ -29,7 +30,7 @@ GetStatsError.prototype.name = 'GetStatsError';
 var API = {
   // The API endpoint. The final endpoint will be:
   //    /api/**endpointUrl**
-  url: ':entity/:id/stats',
+  url: ':entity/:id/:raw/stats',
 
   // The API method to implement.
   method: 'GET'
@@ -38,8 +39,10 @@ var API = {
 // API core function logic. If this function is executed then each check is passed.
 //TODO:
 API.logic = function getStats( req, res, next ) {
-  var entity = req.params.entity;
-  var filter = {"task":req.params.id};
+  var entity = req.params.entity,
+      filter = {"task":req.params.id},
+      raw = req.params.raw;
+
 
   log.trace( 'Stats for %s with id %s', entity, req.params.id);
   
@@ -674,61 +677,85 @@ API.logic = function getStats( req, res, next ) {
     /*
     Data for visualization 
      */
-    var getExecutionRawData = function (Tid,callback) {
-      Execution
-      .find({"task":Tid})
-      .exec(req.wrap(function (err,executions){
-        var result = new Array(),
-            performers = new Array();
-        _.each(executions,function (execution){
-          var tuple = {},
-              Pid;
-          tuple.endDate=execution.closedDate;
-          tuple.startDate=execution.createdDate;
-          Pid=getPerformerId(execution);
-          tuple.taskName=Pid;
-          if (!(_.contains(performers,Pid))) {
-            performers.push(Pid);
-          }
-          if (execution.status==="CLOSED") {
-            tuple.status="CLOSED";
-          }else if(execution.status==="INVALID"){
-            tuple.status="INVALID";
-          }else if (execution.status==="CREATED") {
-            tuple.status="CREATED";
-          }
-          result.push(tuple);
-        });
-        var results = {"executions":result,"performers":performers};
-        callback(null, results);
-      }));
-    }
+    var sendRawDataForVisualization = function (Tid,callback) {
+      var getExecution = function(Tid,callback){
+        Execution
+        .find({"task":Tid}, 
+          {"microtask":1,"performer":1,"platform":1,"createdDate":1,"closedDate":1,"status":1})
+        .exec(req.wrap(function (err,executions){
+          var result = {"executions":executions};
+          callback(null,result);
+        }));
+      };
+      var getMicrotask = function (Tid,callback){
+        Microtask
+        .find({"task":Tid},
+          {"status":1})
+        .exec(req.wrap(function (err,microtasks){
+          var result = {"microtasks":microtasks};
+          callback(null,result);
+        }));
+      };
+      var getObject = function (Tid,callback){
+        OBJECT
+        .find({"task":Tid},
+          {"createdDate":1,"closedDate":1,"status":1})
+        .exec(req.wrap(function (err,objects){
+          var result = {"objects":objects};
+          callback(null,result);
+        }));
+      };
+      var getPerformer = function (Tid,callback){
+        var getPerformerById = function(Pid,callback){
+          Performer
+            .find({"_id":Pid})
+            .exec(req.wrap(function (err,performers){
+              var result =performers[0];
+              callback(null,result);
+            }));
+        };
 
-    var getExecutions = function (Tid,callback){
-      Execution
-      .find({"task":Tid},{"_id":1,"createdDate":1,"closedDate":1})
-      .sort({"createdDate":1})
-      .exec(req.wrap(function (err,executions){
-        var results = {"executions":executions};
-        callback(null,results);
-      }));
-    }
+        Execution
+        .distinct("performer",{"task":Tid})
+        .exec(req.wrap(function (err,performers){
+          async.map(performers,getPerformerById,function (err,results){
+            var result = {"performers":results};
+            callback(null,result)
+          });
+        }));
+      };
+      async.parallel([getExecution.bind(this,Tid),
+                      getMicrotask.bind(this,Tid),
+                      getObject.bind(this,Tid),
+                      //getPerformer.bind(this,Tid),
+                      ],
+        function (err,results){
+        var resultCB = {"raw":combineObject(results)};
+        callback(null,resultCB);
+      });
+    };
 
 /*---Entry point ---*/
+
     var time = new Date(),
         SECOND = 1000,
-        tasksArray=[
-                    taskBasic.bind(this,filter.task),
-                    objectStatsOfTask .bind(this,filter.task),
-                    microtaskStatsOfTask.bind(this,filter.task),
-                    executionStatsOfTask.bind(this,filter.task),
-                    performerStatsOfTask.bind(this,filter.task),
-                    platformStatsOfTask.bind(this,filter.task),
+        tasksArray;
+    tasksArray=[
+                taskBasic.bind(this,filter.task),
+                objectStatsOfTask .bind(this,filter.task),
+                microtaskStatsOfTask.bind(this,filter.task),
+                executionStatsOfTask.bind(this,filter.task),
+                performerStatsOfTask.bind(this,filter.task),
+                platformStatsOfTask.bind(this,filter.task),
 
-                    microtaskList.bind(this,filter.task),
-                    performerList.bind(this,filter.task),
-                    platformList.bind(this,filter.task),
-                    ];
+                microtaskList.bind(this,filter.task),
+                performerList.bind(this,filter.task),
+                platformList.bind(this,filter.task),
+                ];
+    if (raw==="true") {
+      tasksArray.push(sendRawDataForVisualization.bind(this,filter.task));
+    }
+
     async.parallel(tasksArray,function (err,results){
       var taskJSON = {};
       taskJSON = combineObject(results);
